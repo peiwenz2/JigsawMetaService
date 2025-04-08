@@ -1,7 +1,20 @@
-# jigsawMetaService
-a distributed manager service based on etcdv3 and backend using redis cluster
+# MetaService
 
+A Distributed Meta Data Management Service.
+## Role
+There is **two** roles of MetaSercice:
+- Data Backend: As the storage of meta data(instance status, prefix hash kv, etc.)
+- Cluster Manager: The distributed manager(1 master N followers) could conduct periodical tasks within the cluster.
+
+Note: Currently for simplicity, the data backend is using redis cluster, and the manager process based on ETCD for master election.
+
+## Install
+
+### prerequisites
+
+```
 sudo apt-get install -y \
+    golang \
     libgrpc++-dev \
     libprotobuf-dev \
     protobuf-compiler \
@@ -9,7 +22,14 @@ sudo apt-get install -y \
     libhiredis-dev \
     libcpprest-dev \
     protobuf-compiler-grpc \
-    libspdlog-dev
+    libspdlog-dev \
+    nlohmann-json3-dev \
+    libgtest-dev \
+    build-essential
+
+export PATH=$PATH:/usr/local/go/bin
+export GOPATH=$HOME/go
+export PATH=$PATH:$GOPATH/bin
 
 // etcd support
 git clone https://github.com/etcd-cpp-apiv3/etcd-cpp-apiv3.git
@@ -33,10 +53,26 @@ cd build
 cmake ..
 make
 make install
+```
 
-// compile
+### make
+```
 mkdir build && cd build
 cmake ..
 make -j4
 
-./meta_service
+# debug
+mkdir build_debug && cd build_debug
+cmake -DCMAKE_BUILD_TYPE=Debug ..
+make -j4
+```
+
+## Run
+```
+./meta_service --config=./config/config.json
+```
+
+## LOG
+```
+/opt/meta_service/meta_service.LOG
+```

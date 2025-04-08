@@ -1,0 +1,162 @@
+#include "MetaService.h"
+#include <fstream>
+#include <vector>
+#include <string>
+#include <iostream>
+#include <sched.h>
+
+using namespace std::chrono_literals;
+
+std::string vectorToStringWithComma(const std::vector<std::string>& vec) {
+    std::string result;
+    for (size_t i = 0; i < vec.size(); ++i) {
+        result += vec[i];
+        if (i != vec.size() - 1) { // Don't add a comma after the last element
+            result += ", ";
+        }
+    }
+    return result;
+}
+
+MetaService::MetaService() {
+    // 初始化日志系统
+    if (system("mkdir -p /opt/meta_service/") != 0) {
+        throw std::runtime_error("Failed to create log directory");
+    }
+    logger = spdlog::rotating_logger_mt("meta_logger", 
+               "/opt/meta_service/meta_service.LOG", LOG_ROTATE_SIZE, 1);
+    logger->set_level(spdlog::level::info);
+    logger->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] %v");
+    logger->flush_on(spdlog::level::info); 
+    
+    // 读取IP列表
+    std::ifstream file("./iplist");
+    std::string ip;
+    while(getline(file, ip)) {
+        etcd_endpoints.emplace_back("http://" + ip + ":2379");
+    }
+    
+    init_etcd();
+    //init_redis();
+}
+
+void MetaService::init_etcd() {
+    std::string etcd_hosts = "http://172.30.0.73:2379,http://172.30.0.72:2379,http://172.30.0.71:2379";
+    etcd_client = std::make_shared<etcd::Client>(etcd_hosts);
+    logger->info("Using etcd hosts {}", etcd_hosts);
+}
+
+void MetaService::init_redis() {
+    sw::redis::ConnectionOptions opts;
+    opts.type = sw::redis::ConnectionType::TCP;
+    for (const auto& ep : etcd_endpoints) {
+        //opts.host = ep.substr(7, ep.find(':')-7); // 从http://剥离IP
+        logger->info("Using ip {} to connect to redis", opts.host);
+        break; // 使用第一个节点IP连接Redis集群
+    }
+    opts.port = 7000;
+    opts.host = "172.30.0.73";
+    redis_cluster = std::make_shared<sw::redis::RedisCluster>(opts);
+}
+
+void MetaService::election_loop() {
+    while (running) {
+        try {
+            auto lease = etcd_client->leasegrant(10).get(); // lease alive for 10 second
+            if (lease.error_code()) {
+                // bad lease -> exit
+                logger->error("Lease creation failed: {}", lease.error_message());
+                throw std::runtime_error(lease.error_message());
+            }
+
+            etcdv3::Transaction txn;
+            txn.add_compare_create(ELECTION_KEY, 0);
+            txn.add_success_put(ELECTION_KEY, "leader", lease.value().lease());
+            txn.add_failure_delete(ELECTION_KEY);
+
+            auto txn_resp = etcd_client->txn(txn).get();
+            if (txn_resp.is_ok()) {
+                is_leader = true;
+                if (last_role != "leader")
+                {
+                    logger->info("OnLeaderChange: Become leader");
+                    last_role = "leader";
+                }
+                // Keep the lease alive
+                etcd_client->leasekeepalive(lease.value().ttl()).wait();
+            } else {
+                is_leader = false;
+                // Watch for changes in the leader key
+                etcd_client->watch(ELECTION_KEY).wait();
+                if (last_role != "follower")
+                {
+                    logger->info("OnLeaderChange: Become follower");
+                    last_role = "follower";
+                }
+            }
+        } catch (const std::exception& e) {
+            logger->error("Election error: {}", e.what());
+        }
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+}
+
+void MetaService::leader_election_loop() {
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(0, &cpuset); // 绑定到CPU0
+    if (pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset)) {
+        logger->error("Failed to set CPU affinity");
+    }
+
+    while (running) {
+        if (is_leader) {
+            try {
+                std::vector<std::string> keys = {/* 需要监控的keys */};
+                std::vector<sw::redis::OptionalString> values;
+                redis_cluster->mget(keys.begin(), keys.end(), std::back_inserter(values));
+                
+                for (size_t i = 0; i < keys.size(); ++i) {
+                    if (values[i] && !validate_value(*values[i])) {
+                        logger->warn("Invalid value for key: {}", keys[i]);
+                    }
+                }
+            } catch (const std::exception& e) {
+                logger->error("Scan error: {}", e.what());
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::seconds(10));
+    }
+}
+
+bool MetaService::validate_value(const std::string& value) {
+    // 添加具体的验证逻辑
+    return !value.empty();
+}
+
+void MetaService::run() {
+    logger->info("MetaService started");
+    election_thread = std::thread(&MetaService::election_loop, this);
+    scan_thread = std::thread(&MetaService::leader_election_loop, this);
+    
+    // 主循环处理请求
+    while (running) {
+        if (is_leader) {
+            // 处理读写请求
+        }
+        std::this_thread::sleep_for(100ms);
+    }
+    
+    election_thread.join();
+    scan_thread.join();
+}
+
+MetaService::~MetaService() {
+    running = false;
+    if (is_leader && etcd_client) {
+        etcd_client->rm(ELECTION_KEY).get();
+    }
+    if (logger) {
+        logger->flush();  // 确保日志刷新
+    }
+}
