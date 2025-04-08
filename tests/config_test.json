@@ -1,0 +1,38 @@
+{
+    "self_ip": "172.30.0.72",
+    "members_ip": [
+        "172.30.0.71",
+        "172.30.0.72",
+        "172.30.0.73"
+    ],
+    "etcd": {
+        "endpoints": [
+            "http://172.30.0.71:2379",
+            "http://172.30.0.72:2379",
+            "http://172.30.0.73:2379"
+        ],
+        "timeout_seconds": 5
+    },
+    "redis_cluster": {
+        "hosts": [
+            "172.30.0.72:7003",
+            "172.30.0.72:7004",
+            "172.30.0.72:7005"
+        ],
+        "config": {
+            "connect_timeout_ms": 2000,
+            "socket_timeout_ms": 1000,
+            "pool_size": 10
+        },
+        "port": 7000,
+        "mode": "cluster",
+        "max_batch_size": 500,
+        "max_concurrent_routines": 10,
+        "query_timeout_second": 1,
+        "log_config": {
+            "file_path": "/opt/meta_service/redis_go.LOG",
+            "max_size_mb": 5,
+            "max_backups": 1
+        }
+    }
+}
