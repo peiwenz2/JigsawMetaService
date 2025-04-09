@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"time"
+    "sort"
 	"sync"
 	"fmt"
 	"unsafe"
@@ -77,7 +78,6 @@ func Initialize(configPath *C.char) *C.char {
 func initLogger() {
 	logCfg := cfg.RedisCluster.LogConfig
 
-	// 设置默认值
 	if logCfg.FilePath == "" {
 		logCfg.FilePath = "/var/log/redis_wrapper.log"
 	}
@@ -107,10 +107,48 @@ func connectRedisCluster() error {
 	}
 
 	clusterClient = redis.NewClusterClient(opts)
-	ctx, cancel := context.WithTimeout(context.Background(), 
+	ctx, cancel := context.WithTimeout(context.Background(),
 		time.Duration(redisCfg.Config.ConnectTimeoutMs)*time.Millisecond)
 	defer cancel()
 	return clusterClient.Ping(ctx).Err()
+}
+
+//export SingleRead
+func SingleRead(key *C.char) *C.char {
+    ctx, cancel := context.WithTimeout(context.Background(), cfg.RedisCluster.QueryTimeout * time.Second)
+    defer cancel()
+
+    goKey := C.GoString(key)
+    val, err := clusterClient.Get(ctx, goKey).Result()
+    if err == redis.Nil {
+        return C.CString("")
+    }
+    if err != nil {
+        logger.Printf("SingleRead failed for key %s: %v", goKey, err)
+        return nil
+    }
+    //logger.Printf("SingleRead ok for key %s: %v", goKey, val)
+    return C.CString(val)
+}
+
+//export SingleWrite
+func SingleWrite(key, value *C.char) C.int {
+    ctx, cancel := context.WithTimeout(context.Background(), cfg.RedisCluster.QueryTimeout * time.Second)
+    defer cancel()
+
+    goKey := C.GoString(key)
+    goValue := C.GoString(value)
+    err := clusterClient.Set(ctx, goKey, goValue, 0).Err()
+    if err != nil {
+        logger.Printf("SingleWrite failed for key %s: %v", goKey, err)
+        return C.int(1)
+    }
+    return C.int(0)
+}
+
+//export FreeCString
+func FreeCString(s *C.char) {
+    C.free(unsafe.Pointer(s))
 }
 
 func batchWrite(keys, values []string) error {
@@ -149,7 +187,7 @@ func SafeBatchWrite(keys, values **C.char, count C.int) *C.char {
     defer cancel()
 
     batches := splitIntoKeyValueBatches(goKeys, goVals, cfg.RedisCluster.MaxBatchSize)
-    
+
     sem := make(chan struct{}, cfg.RedisCluster.MaxConcurrentBatches)
     for i, batch := range batches {
         select {
@@ -585,6 +623,96 @@ func SafeBatchDelete(keys **C.char, count C.int) *C.char {
 	return C.CString("")
 }
 
+//export GetHottestKeys
+func GetHottestKeys(prefix *C.char, batchSize C.int, topN C.int, keyCount *C.int) **C.char {
+    ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+    defer cancel()
+
+    keysPtr := ScanInstanceKeys(prefix, batchSize, keyCount)
+    if keysPtr == nil || *keyCount == 0 {
+        return nil
+    }
+
+    count := int(*keyCount)
+    cKeys := (*[1<<30 -1]*C.char)(unsafe.Pointer(keysPtr))[:count:count]
+    allKeys := make([]string, count)
+    for i := 0; i < count; i++ {
+        allKeys[i] = C.GoString(cKeys[i])
+    }
+
+    //logger.Printf("ScanInstanceKeys with prefix %v, keys: %v", prefix, allKeys)
+
+    type keyHeat struct {
+        key  string
+        heat int
+    }
+
+    var (
+        heatChan   = make(chan keyHeat, count)
+        errChan    = make(chan error, count)
+        wg         sync.WaitGroup
+        limiter    = make(chan struct{}, 48) // 并发控制
+    )
+
+    for _, key := range allKeys {
+        wg.Add(1)
+        limiter <- struct{}{}
+        go func(k string) {
+            defer func() {
+                <-limiter
+                wg.Done()
+            }()
+
+            val, err := clusterClient.Do(ctx, "OBJECT", "FREQ", k).Int()
+            if err != nil {
+                errChan <- fmt.Errorf("key %s: %v", k, err)
+                return
+            }
+            logger.Printf("Key %v FREQ %v ", k, val)
+            heatChan <- keyHeat{k, val}
+        }(key)
+    }
+
+    go func() {
+        wg.Wait()
+        close(heatChan)
+        close(errChan)
+    }()
+
+    heats := make([]keyHeat, 0, count)
+    for kh := range heatChan {
+        heats = append(heats, kh)
+    }
+
+    if len(errChan) > 0 {
+        logger.Printf("GetHottestKeys partial errors (%d): %v", len(errChan), <-errChan)
+    }
+
+    sort.Slice(heats, func(i, j int) bool {
+        return heats[i].heat > heats[j].heat
+    })
+
+    if len(heats) > int(topN) {
+        heats = heats[:topN]
+    }
+
+    *keyCount = C.int(len(heats))
+    if len(heats) == 0 {
+        return nil
+    }
+
+    cArray := (**C.char)(C.malloc(C.size_t(len(heats)) * C.size_t(unsafe.Sizeof(uintptr(0)))))
+    pointers := (*[1<<30 -1]*C.char)(unsafe.Pointer(cArray))
+
+    for i, kh := range heats {
+        pointers[i] = C.CString(kh.key)
+    }
+
+    //FreeScanResults(keysPtr, C.int(count))
+
+    return cArray
+}
+
 //export FreeStrings
 func FreeStrings(arr **C.char, count C.int) {
 	cArray := unsafe.Slice(arr, int(count))
@@ -606,15 +734,15 @@ func FreeScanResults(cArray **C.char, count C.int) {
     if cArray == nil {
         return
     }
-    
+
     // Convert to slice of C strings
     pointers := (*[1<<30 - 1]*C.char)(unsafe.Pointer(cArray))[:count:count]
-    
+
     // Free individual strings
     for _, s := range pointers {
         C.free(unsafe.Pointer(s))
     }
-    
+
     // Free the array itself
     C.free(unsafe.Pointer(cArray))
 }

@@ -60,12 +60,8 @@ make install
 mkdir build && cd build
 cmake ..
 make -j4
-
-# debug
-mkdir build_debug && cd build_debug
-cmake -DCMAKE_BUILD_TYPE=Debug ..
-make -j4
 ```
+![image.png](https://cn-hangzhou.oss-cdn.aliyun-inc.com/git/force/uploads/comment/281765/5123895080630744/code-image.png)
 
 ## Run
 ```
@@ -75,4 +71,20 @@ make -j4
 ## LOG
 ```
 /opt/meta_service/meta_service.LOG
+/opt/meta_service/redis_go.LOG
 ```
+
+## TESTS
+we have tests for cpp and python APIs
+```
+1. cpp
+./build/metaservice_basic_test
+
+2. python
+python3 -m pytest tests/ -v  -s
+```
+cpp test run
+![image.png](https://cn-hangzhou.oss-cdn.aliyun-inc.com/git/force/uploads/comment/281765/33932392082779874/code-image.png)
+
+python test run
+![image.png](https://cn-hangzhou.oss-cdn.aliyun-inc.com/git/force/uploads/comment/281765/1442212766289460/code-image.png)
