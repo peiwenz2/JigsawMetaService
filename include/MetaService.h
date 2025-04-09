@@ -48,7 +48,7 @@ private:
 
     std::shared_ptr<etcd::Client> etcd_client;
     std::shared_ptr<spdlog::logger> logger;
-    
+
     std::atomic<bool> is_leader{false};
     std::atomic<bool> running{true};
     std::thread election_thread;

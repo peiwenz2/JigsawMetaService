@@ -1,5 +1,5 @@
 #include "MetaService.h"
-#include "redis_go_wrapper.h"
+#include "MetaServiceClient.h"
 
 #include <fstream>
 #include <vector>
@@ -30,16 +30,16 @@ MetaService::MetaService(const std::string& config_path,
     initLog();
 
     // init redis
-    GoRedisWrapper::Initialize(config_path);
+    MetaServiceClient::Initialize(config_path);
     std::vector<std::string> keys = {"etcd_hosts", "redis_hosts"};
     std::vector<std::string> values = {VectorToStringWithComma(etcd_endpoints), VectorToStringWithComma(redis_hosts)};
     auto start_write = std::chrono::high_resolution_clock::now();
-    if (!GoRedisWrapper::BatchWrite(keys, values))
+    if (!MetaServiceClient::BatchWrite(keys, values))
     {
         throw std::invalid_argument("Redis is broken. Write failed");
     }
     auto start_read = std::chrono::high_resolution_clock::now();
-    std::vector<std::string> results = GoRedisWrapper::BatchRead(keys);
+    std::vector<std::string> results = MetaServiceClient::BatchRead(keys);
     if (results[0] != VectorToStringWithComma(etcd_endpoints) ||
         results[1] != VectorToStringWithComma(redis_hosts))
     {
