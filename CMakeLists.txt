@@ -8,10 +8,10 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
-# Add debug symbols for Release mode (optional, remove if not needed)
+# Add debug symbols for Release mode (optional)
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -g")
 
-# Add debug symbols and disable optimizations for Debug mode
+# Debug mode flags
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g -O0")
 set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -g -O0")
 
@@ -49,11 +49,11 @@ find_path(ETCD_CPP_INCLUDE_DIR etcd/Client.hpp
 find_library(ETCD_CPP_LIBRARY etcd-cpp-api
     PATHS /usr/local/lib /usr/lib)
 if (NOT ETCD_CPP_INCLUDE_DIR OR NOT ETCD_CPP_LIBRARY)
-    message(FATAL_ERROR "etcd-cpp-api not found, please check installation path")
+    message(FATAL_ERROR "etcd-cpp-api not found")
 endif()
 find_package(spdlog REQUIRED)
 find_package(Threads REQUIRED)
-find_package(cpprestsdk REQUIRED NAMES cpprest cpprestsdk)
+find_package(cpprestsdk REQUIRED)
 find_package(nlohmann_json 3.2.0 REQUIRED)
 
 # ------------------------------
@@ -69,6 +69,26 @@ include_directories(
 )
 
 # ------------------------------
+# MetaServiceClient SDK Library
+# ------------------------------
+add_library(MetaServiceClient SHARED
+    src/MetaServiceClient.cpp
+    src/metaserviceclient_capi.cpp  # C API wrapper
+)
+add_dependencies(MetaServiceClient redis_wrapper)
+target_include_directories(MetaServiceClient PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include  # Where MetaServiceClient.h lives
+)
+target_link_libraries(MetaServiceClient
+    PRIVATE
+    ${GO_BUILD_DIR}/${GO_LIB_NAME}
+    spdlog::spdlog
+    nlohmann_json::nlohmann_json
+    pthread
+    dl
+)
+
+# ------------------------------
 # Main Executable
 # ------------------------------
 add_executable(meta_service
@@ -77,53 +97,57 @@ add_executable(meta_service
     src/main.cpp
 )
 add_dependencies(meta_service redis_wrapper)
-
-# ------------------------------
-# Test Configuration
-# ------------------------------
-add_executable(redis_wrapper_tests
-    tests/redis_wrapper_test.cpp
-)
-add_dependencies(redis_wrapper_tests redis_wrapper)
-target_link_libraries(redis_wrapper_tests
-    PRIVATE
-    GTest::GTest
-    GTest::Main
-    ${CMAKE_THREAD_LIBS_INIT}
-    spdlog::spdlog
-    nlohmann_json::nlohmann_json
-    ${GO_BUILD_DIR}/${GO_LIB_NAME}
-    dl
-)
-
-# ------------------------------
-# Link Libraries for Main Executable
-# ------------------------------
 target_link_libraries(meta_service
     PRIVATE
+    MetaServiceClient
     cpprest
     etcd-cpp-api
     spdlog::spdlog
     nlohmann_json::nlohmann_json
     pthread
     dl
-    ${CMAKE_THREAD_LIBS_INIT}
     ${ETCD_CPP_LIBRARY}
     ${GO_BUILD_DIR}/${GO_LIB_NAME}
 )
 
 # ------------------------------
+# Test Configuration
+# ------------------------------
+add_executable(metaservice_basic_test
+    tests/metaservice_basic_test.cpp
+)
+add_dependencies(metaservice_basic_test redis_wrapper)
+target_link_libraries(metaservice_basic_test
+    PRIVATE
+    MetaServiceClient
+    GTest::GTest
+    GTest::Main
+    Threads::Threads
+    spdlog::spdlog
+    nlohmann_json::nlohmann_json
+    ${GO_BUILD_DIR}/${GO_LIB_NAME}
+    dl
+)
+
+# ------------------------------
 # Installation
 # ------------------------------
-install(TARGETS meta_service DESTINATION bin)
-install(FILES ${GO_BUILD_DIR}/${GO_LIB_NAME} DESTINATION bin)
+install(TARGETS meta_service MetaServiceClient DESTINATION lib)
+install(FILES
+    ${GO_BUILD_DIR}/${GO_LIB_NAME}
+    DESTINATION lib
+)
+install(FILES
+    include/MetaServiceClient.h  # SDK header
+    DESTINATION include
+)
 
 # ------------------------------
 # Testing Configuration
 # ------------------------------
 enable_testing()
 add_test(
-    NAME redis_wrapper_tests
-    COMMAND $<TARGET_FILE:redis_wrapper_tests>
-    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/bin
+    NAME metaservice_basic_test
+    COMMAND $<TARGET_FILE:metaservice_basic_test>
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
