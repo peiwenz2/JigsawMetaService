@@ -17,6 +17,7 @@
 #include <vector>
 #include <unordered_set>
 #include "common.h"
+#include "MetaServiceClient.h"
 
 #define SPDLOG_ACTIVE_LEVEL SPDLOG_LEVEL_INFO
 
@@ -27,13 +28,19 @@ enum ElectionStrategy {
     SELF_ELECTION,
 };
 
+// instance info: e.g."prefix-key(serviceid.instance.num)-suffix"
+struct InstanceKeyInfo {
+    std::string prefix;
+    std::string suffix;
+    std::string service_id;
+    int instance_num;
+    std::string ip;
+};
+
 class MetaService {
 public:
     MetaService(const std::string& config_path,
-                const std::string& self_ip,
-                const std::vector<std::string>& members_ip,
-                const nlohmann::json& etcd_config,
-                const nlohmann::json& redis_config);
+                const nlohmann::json& config);
     ~MetaService();
 
     void Run();
@@ -44,6 +51,8 @@ private:
     void leader_election_loop();
 
     void start_election();
+    void check_instance_health();
+    void parse_instance_key(const std::string& key, InstanceKeyInfo* keyInfo);
     std::string getEtcdLeaderByCli();
 
     std::shared_ptr<etcd::Client> etcd_client;
@@ -61,7 +70,7 @@ private:
     char *self_id;
     int current_lease_id = -1;
 
-    nlohmann::json etcd_config_;
+    nlohmann::json config_;
     std::vector<std::string> etcd_endpoints;
     std::vector<std::string> members_ip_;
     std::string self_ip_ = "127.0.0.1";

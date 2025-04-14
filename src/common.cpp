@@ -14,3 +14,26 @@ std::string VectorToStringWithComma(const std::vector<std::string>& vec)
     }
     return result;
 }
+
+std::vector<std::string> StringToVectorWithComma(const std::string& str) {
+    std::vector<std::string> vec;
+    std::stringstream ss(str);
+    std::string token;
+
+    while (std::getline(ss, token, ',')) {
+        vec.push_back(token);
+    }
+
+    return vec;
+}
+
+std::vector<std::pair<std::string, double>> ParseZRangeResult(const char* json)
+{
+    nlohmann::json data = nlohmann::json::parse(json);
+    std::vector<std::pair<std::string, double>> result;
+    for (const auto& item : data)
+    {
+        result.emplace_back(item["Member"].get<std::string>(), item["Score"].get<double>());
+    }
+    return result;
+}

@@ -1,5 +1,4 @@
 #include "MetaService.h"
-#include "MetaServiceClient.h"
 
 #include <fstream>
 #include <vector>
@@ -14,17 +13,13 @@
 using namespace std::chrono_literals;
 
 MetaService::MetaService(const std::string& config_path,
-            const std::string& self_ip,
-            const std::vector<std::string>& members_ip,
-            const nlohmann::json& etcd_config,
-            const nlohmann::json& redis_config)
+            const nlohmann::json& config)
 {
-
-    self_ip_ = self_ip;
-    members_ip_ = members_ip;
-    etcd_config_ = etcd_config;
-    etcd_endpoints = etcd_config.value("endpoints", std::vector<std::string>{});
-    redis_hosts = redis_config.value("hosts", std::vector<std::string>{});
+    config_ = config;
+    self_ip_ = config["self_ip"].get<std::string>();
+    members_ip_ = config["members_ip"].get<std::vector<std::string>>();
+    etcd_endpoints = config.value("etcd", nlohmann::json::object()).value("endpoints", std::vector<std::string>{});
+    redis_hosts = config.value("redis_cluster", nlohmann::json::object()).value("hosts", std::vector<std::string>{});
 
     // init log system
     initLog();
@@ -61,6 +56,12 @@ MetaService::MetaService(const std::string& config_path,
     {
         throw std::invalid_argument("Self IP not in members list");
     }
+    if (!config_.contains("meta_data") || !config_["meta_data"].contains("instance") ||
+        !config_["meta_data"]["instance"].contains("prefix") ||
+        !config_["meta_data"]["instance"].contains("suffix") ||
+        !config_.contains("self_ip")) {
+        throw std::invalid_argument("MetaData in config.json invalid");
+    }
 
     SPDLOG_LOGGER_INFO(logger, "ETCD init. self ip: {}, member ip: {}, etcd endpoints: {}",
                         self_ip_, VectorToStringWithComma(members_ip_), VectorToStringWithComma(etcd_endpoints));
@@ -77,7 +78,7 @@ void MetaService::Run()
     {
         if (is_leader)
         {
-            SPDLOG_LOGGER_INFO(logger, "do something in Run Leader");
+            check_instance_health();
         } else {
             // Follower do something
             SPDLOG_LOGGER_INFO(logger, "do something in Run Follower");
@@ -176,6 +177,7 @@ void MetaService::use_etcd_leader_loop()
     {
         SPDLOG_LOGGER_ERROR(logger, "Failed to set CPU affinity");
     }
+    bool leader_change = false;
 
     while (running)
     {
@@ -194,6 +196,7 @@ void MetaService::use_etcd_leader_loop()
             if (new_leader_id != "" && new_leader_id != current_etcd_leader)
             {
                 // leader changed
+                leader_change = true;
                 SPDLOG_LOGGER_INFO(logger, "OnLeaderChange: Leader changed. Old leader: {}. New leader: {}. Self ip: {}",
                     current_etcd_leader, new_leader_id, self_ip_);
                 if (current_etcd_leader.find(self_ip_) != std::string::npos)
@@ -213,14 +216,15 @@ void MetaService::use_etcd_leader_loop()
         }
 
         // Leader can do something here
-        if (is_leader)
+        if (is_leader && leader_change)
         {
+            leader_change = false;
             SPDLOG_LOGGER_INFO(logger, "Leader performing tasks...");
         }
-        else
+        /*else
         {
             SPDLOG_LOGGER_INFO(logger, "Follower performing tasks...");
-        }
+        }*/
 
         std::this_thread::sleep_for(std::chrono::seconds(ETCD_LEADER_CHECK_TIME));
     }

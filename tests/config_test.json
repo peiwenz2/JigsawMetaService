@@ -20,7 +20,7 @@
             "172.30.0.72:7005"
         ],
         "config": {
-            "connect_timeout_ms": 2000,
+            "connect_timeout_ms": 5000,
             "socket_timeout_ms": 1000,
             "pool_size": 10
         },
@@ -33,6 +33,12 @@
             "file_path": "/opt/meta_service/redis_go.LOG",
             "max_size_mb": 5,
             "max_backups": 1
+        }
+    },
+    "meta_data": {
+        "instance": {
+            "prefix": "dashscope.api.batch",
+            "suffix": "lock"
         }
     }
 }
