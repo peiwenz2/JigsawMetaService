@@ -74,6 +74,7 @@ include_directories(
 add_library(MetaServiceClient SHARED
     src/MetaServiceClient.cpp
     src/metaserviceclient_capi.cpp  # C API wrapper
+    src/common.cpp
 )
 add_dependencies(MetaServiceClient redis_wrapper)
 target_include_directories(MetaServiceClient PUBLIC
@@ -93,6 +94,7 @@ target_link_libraries(MetaServiceClient
 # ------------------------------
 add_executable(meta_service
     src/MetaService.cpp
+    src/MetaService_impl.cpp
     src/common.cpp
     src/main.cpp
 )

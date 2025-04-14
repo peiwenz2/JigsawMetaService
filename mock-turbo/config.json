@@ -1,0 +1,6 @@
+{
+  "turbo_num": 5,
+  "redis_uri": "redis://localhost:6379",
+  "service_id": "test-service-1",
+  "redis_mode": "cluster"
+}

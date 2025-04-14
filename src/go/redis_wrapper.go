@@ -50,6 +50,11 @@ type LogConfig struct {
 	MaxBackups  int    `json:"max_backups"`
 }
 
+type ZMember struct {
+    Member string  `json:"member"`
+    Score  float64 `json:"score"`
+}
+
 //export Initialize
 func Initialize(configPath *C.char) *C.char {
 	cfgFile := C.GoString(configPath)
@@ -69,8 +74,10 @@ func Initialize(configPath *C.char) *C.char {
 	initLogger()
 
 	if err := connectRedisCluster(); err != nil {
+        logger.Printf("RedisCluster Initialize error: %v.", err.Error())
 		return C.CString(err.Error())
 	}
+    logger.Printf("RedisCluster Initialize.")
 
 	return C.CString("")
 }
@@ -94,6 +101,7 @@ func initLogger() {
 		MaxBackups: logCfg.MaxBackups,
 	}
 	logger = log.New(logOutput, "[RedisGo] ", log.LstdFlags|log.Lshortfile)
+    logger.Printf("Logger init.")
 }
 
 func connectRedisCluster() error {
@@ -132,17 +140,122 @@ func SingleRead(key *C.char) *C.char {
 }
 
 //export SingleWrite
-func SingleWrite(key, value *C.char) C.int {
+func SingleWrite(key, value *C.char, with_set_name *C.char) C.int {
     ctx, cancel := context.WithTimeout(context.Background(), cfg.RedisCluster.QueryTimeout * time.Second)
     defer cancel()
 
     goKey := C.GoString(key)
     goValue := C.GoString(value)
+    setName := C.GoString(with_set_name)
     err := clusterClient.Set(ctx, goKey, goValue, 0).Err()
     if err != nil {
         logger.Printf("SingleWrite failed for key %s: %v", goKey, err)
         return C.int(1)
     }
+    if setName != "" {
+        err = clusterClient.SAdd(ctx, setName, goKey).Err()
+        if err != nil {
+            logger.Printf("SADD failed for set %s (key %s): %v", setName, goKey, err)
+        }
+    }
+    return C.int(0)
+}
+
+//export SingleZRead
+func SingleZRead(zsetKey *C.char, member *C.char) *C.char {
+    ctx, cancel := context.WithTimeout(context.Background(), cfg.RedisCluster.QueryTimeout * time.Second)
+    defer cancel()
+
+    goZSetKey := C.GoString(zsetKey)
+    goMember := C.GoString(member)
+
+    score, err := clusterClient.ZScore(ctx, goZSetKey, goMember).Result()
+    if err == redis.Nil {
+        return C.CString("")  // member not exist
+    }
+    if err != nil {
+        logger.Printf("SingleZRead failed for zset %s member %s: %v", goZSetKey, goMember, err)
+        return nil
+    }
+
+    return C.CString(fmt.Sprintf("%f", score))
+}
+
+//export SingleZWrite
+func SingleZWrite(zsetKey *C.char, member *C.char, score C.double, withSetName *C.char) C.int {
+    ctx, cancel := context.WithTimeout(context.Background(), cfg.RedisCluster.QueryTimeout * time.Second)
+    defer cancel()
+
+    goZSetKey := C.GoString(zsetKey)
+    goMember := C.GoString(member)
+    goScore := float64(score)
+    setName := C.GoString(withSetName)
+
+    err := clusterClient.ZAdd(ctx, goZSetKey, redis.Z{
+        Score:  goScore,
+        Member: goMember,
+    }).Err()
+    if err != nil {
+        logger.Printf("SingleZWrite failed for zset %s member %s: %v", goZSetKey, goMember, err)
+        return C.int(1)
+    }
+
+    if setName != "" {
+        err = clusterClient.SAdd(ctx, setName, goZSetKey).Err()
+        if err != nil {
+            logger.Printf("SADD failed for set %s (zset key %s): %v", setName, goZSetKey, err)
+        }
+    }
+    //logger.Printf("SingleZWrite ok for zset %s member %s", goZSetKey, goMember)
+
+    return C.int(0)
+}
+
+//export SingleZReadRange
+func SingleZReadRange(zsetKey *C.char, isTopN C.int, n C.int) *C.char {
+    ctx, cancel := context.WithTimeout(context.Background(), cfg.RedisCluster.QueryTimeout*time.Second)
+    defer cancel()
+
+    goZSetKey := C.GoString(zsetKey)
+    var redisMembers []redis.Z
+
+    if isTopN == 1 {
+        redisMembers, _ = clusterClient.ZRevRangeWithScores(ctx, goZSetKey, 0, int64(n-1)).Result()
+    } else {
+        redisMembers, _ = clusterClient.ZRangeWithScores(ctx, goZSetKey, 0, -1).Result()
+    }
+
+    var jsonMembers []ZMember
+    for _, z := range redisMembers {
+        member, ok := z.Member.(string)
+        if !ok {
+            continue
+        }
+        jsonMembers = append(jsonMembers, ZMember{
+            Member: member,
+            Score:  z.Score,
+        })
+    }
+
+    jsonData, _ := json.Marshal(jsonMembers)
+    return C.CString(string(jsonData))
+}
+
+//export SingleZRem
+func SingleZRem(zsetKey *C.char, member *C.char) C.int {
+    ctx, cancel := context.WithTimeout(context.Background(), cfg.RedisCluster.QueryTimeout * time.Second)
+    defer cancel()
+
+    goZSetKey := C.GoString(zsetKey)
+    goMember := C.GoString(member)
+
+    // remove a specific member from zset
+    _, err := clusterClient.ZRem(ctx, goZSetKey, goMember).Result()
+    if err != nil {
+        logger.Printf("ZRem failed for %s member %s: %v", goZSetKey, goMember, err)
+        return C.int(1)
+    }
+    logger.Printf("ZRem ok for %s member %s", goZSetKey, goMember)
     return C.int(0)
 }
 
@@ -378,6 +491,227 @@ func splitIntoBatches(items []string, batchSize int) [][]string {
         batches = append(batches, items[i:end])
     }
     return batches
+}
+
+//export SafeBatchZWrite
+func SafeBatchZWrite(
+    cKeys **C.char,
+    cMembers **C.char,
+    cScores *C.double,
+    count C.int,
+) *C.char {
+    startTime := time.Now()
+    defer func() {
+        logger.Printf("SafeBatchZWrite completed in %v", time.Since(startTime))
+    }()
+
+    goKeys := unsafe.Slice(cKeys, int(count))
+    goMembers := unsafe.Slice(cMembers, int(count))
+    goScores := unsafe.Slice(cScores, int(count))
+
+    entries := make([]struct {
+        key    string
+        member string
+        score  float64
+    }, count)
+
+    for i := 0; i < int(count); i++ {
+        entries[i] = struct {
+            key    string
+            member string
+            score  float64
+        }{
+            key:    C.GoString(goKeys[i]),
+            member: C.GoString(goMembers[i]),
+            score:  float64(goScores[i]),
+        }
+    }
+
+    var (
+        wg      sync.WaitGroup
+        errChan = make(chan error, 1)
+        ctx, cancel = context.WithCancel(context.Background())
+    )
+    defer cancel()
+
+    sem := make(chan struct{}, cfg.RedisCluster.MaxConcurrentBatches)
+    batches := chunkSlice(entries, cfg.RedisCluster.MaxBatchSize)
+
+    for i, batch := range batches {
+        select {
+        case <-ctx.Done():
+            break
+        default:
+            wg.Add(1)
+            sem <- struct{}{}
+
+            go func(batchIndex int, batch []struct{key, member string; score float64}) {
+                defer func() {
+                    <-sem
+                    wg.Done()
+                }()
+
+                pipe := clusterClient.Pipeline()
+                for _, entry := range batch {
+                    pipe.ZAdd(ctx, entry.key, redis.Z{
+                        Score:  entry.score,
+                        Member: entry.member,
+                    })
+                }
+
+                if _, err := pipe.Exec(ctx); err != nil {
+                    select {
+                    case errChan <- fmt.Errorf("batch %d failed: %w", batchIndex, err):
+                        cancel()
+                    default:
+                    }
+                }
+            }(i, batch)
+        }
+    }
+
+    go func() {
+        wg.Wait()
+        close(errChan)
+    }()
+
+    if err := <-errChan; err != nil {
+        logger.Printf("SafeBatchZWrite failed: %v", err)
+        return C.CString(err.Error())
+    }
+    return nil
+}
+
+func chunkSlice(slice []struct{key, member string; score float64}, size int) [][]struct{key, member string; score float64} {
+    var chunks [][]struct{key, member string; score float64}
+    for i := 0; i < len(slice); i += size {
+        end := i + size
+        if end > len(slice) {
+            end = len(slice)
+        }
+        chunks = append(chunks, slice[i:end])
+    }
+    return chunks
+}
+
+//export SafeBatchZRead
+func SafeBatchZRead(requests **C.char, count C.int) *C.char {
+    type ReadRequest struct {
+        ZsetKey string
+        TopN    int
+    }
+
+    cRequests := unsafe.Slice(requests, int(count))
+    reqs := make([]ReadRequest, count)
+    for i := range reqs {
+        reqs[i] = ReadRequest{
+            ZsetKey: C.GoString(cRequests[i]),
+            TopN:    0,
+        }
+    }
+
+    result := make(map[string][]ZMember)
+    var mu sync.Mutex
+    var wg sync.WaitGroup
+    sem := make(chan struct{}, cfg.RedisCluster.MaxConcurrentBatches)
+
+    for _, req := range reqs {
+        wg.Add(1)
+        sem <- struct{}{}
+
+        go func(r ReadRequest) {
+            defer func() {
+                <-sem
+                wg.Done()
+            }()
+
+            members := readZSet(r.ZsetKey, r.TopN)
+            mu.Lock()
+            result[r.ZsetKey] = members
+            mu.Unlock()
+        }(req)
+    }
+
+    wg.Wait()
+
+    jsonData, _ := json.Marshal(result)
+    return C.CString(string(jsonData))
+}
+
+func readZSet(zsetKey string, topN int) []ZMember {
+    ctx, cancel := context.WithTimeout(context.Background(), cfg.RedisCluster.QueryTimeout*time.Second)
+    defer cancel()
+
+    var redisMembers []redis.Z
+    if topN > 0 {
+        redisMembers, _ = clusterClient.ZRevRangeWithScores(ctx, zsetKey, 0, int64(topN-1)).Result()
+    } else {
+        redisMembers, _ = clusterClient.ZRangeWithScores(ctx, zsetKey, 0, -1).Result()
+    }
+
+    var jsonMembers []ZMember
+    for _, z := range redisMembers {
+        if member, ok := z.Member.(string); ok {
+            jsonMembers = append(jsonMembers, ZMember{
+                Member: member,
+                Score:  z.Score,
+            })
+        }
+    }
+    return jsonMembers
+}
+
+//export RemoveKeyFromSet
+func RemoveKeyFromSet(setName, key *C.char) C.int {
+    ctx, cancel := context.WithTimeout(context.Background(), cfg.RedisCluster.QueryTimeout * time.Second)
+    defer cancel()
+
+    goSetName := C.GoString(setName)
+    goKey := C.GoString(key)
+
+    // Skip if set name is empty
+    if goSetName == "" {
+        return C.int(0)
+    }
+
+    // Remove the key from the set
+    _, err := clusterClient.SRem(ctx, goSetName, goKey).Result()
+    if err != nil {
+        logger.Printf("SREM failed for set %s (key %s): %v", goSetName, goKey, err)
+        return C.int(1)
+    }
+
+    return C.int(0)
+}
+
+//export GetKeysInSet
+func GetKeysInSet(setName *C.char, keyCount *C.int) **C.char {
+    ctx, cancel := context.WithTimeout(context.Background(), cfg.RedisCluster.QueryTimeout * time.Second)
+    defer cancel()
+
+    goSetName := C.GoString(setName)
+
+    // 1. Get all members from the Redis Set
+    keys, err := clusterClient.SMembers(ctx, goSetName).Result()
+    if err != nil {
+        logger.Printf("SMEMBERS failed for set %s: %v", goSetName, err)
+        return nil
+    }
+
+    // 2. Create C array of char* (size +1 for NULL terminator)
+    cArray := C.malloc(C.size_t(len(keys)+1) * C.size_t(unsafe.Sizeof(uintptr(0))))
+    cStrings := (*[1<<30 - 1]*C.char)(cArray)
+    *keyCount = C.int(len(keys))
+
+    // 3. Convert Go strings to C strings
+    for i, key := range keys {
+        cStrings[i] = C.CString(key)
+    }
+
+    // 4. Add NULL terminator at the end
+    cStrings[len(keys)] = nil
+
+    return (**C.char)(cArray)
 }
 
 //export ScanInstanceKeys

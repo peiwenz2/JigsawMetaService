@@ -3,7 +3,9 @@
 #include <string>
 #include <iostream>
 #include <sched.h>
-#include <unistd.h> 
+#include <sstream>
+#include <nlohmann/json.hpp>
+#include <unistd.h>
 
 #define META_SERVICE_DIR    "/opt/meta_service/"
 #define LOG_FILENAME        META_SERVICE_DIR "meta_service.LOG"
@@ -18,3 +20,5 @@
 #define MAIN_PERIODICAL_TASK_TIME_MS 2000
 
 std::string VectorToStringWithComma(const std::vector<std::string>& vec);
+std::vector<std::string> StringToVectorWithComma(const std::string& str);
+std::vector<std::pair<std::string, double>> ParseZRangeResult(const char* json);

@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <nlohmann/json.hpp>
 #include <stdexcept>
 #include "common.h"
 
@@ -14,8 +15,13 @@ public:
 
     // ==================== Core Key-Value Operations ====================
     static std::string Get(const std::string& key);
-    static void Set(const std::string& key, const std::string& value);
+    static void Set(const std::string& key, const std::string& value, const std::string& set_name="");
+    static std::string ZReadScore(const std::string& zsetKey, const std::string& member);
+    static std::vector<std::pair<std::string, double>> ZRead(const std::string& zsetKey, int topN);
+    static void SingleZDelete(const std::string& key, const std::string& member);
+    static void ZWrite(const std::string& zsetKey, const std::string& member, double score, const std::string& withSetName = "");
     static bool Delete(const std::string& key);
+    static void RemoveKeyFromSet(const std::string& set_name, const std::string& key);
 
     // ==================== Batch Operations ====================
     static bool BatchWrite(
@@ -31,6 +37,15 @@ public:
         const std::vector<std::string>& keys
     );
 
+    static bool BatchZWrite(
+        const std::vector<std::string>& zsetKeys,
+        const std::vector<std::string>& members,
+        const std::vector<double>& scores
+    );
+
+    static std::unordered_map<std::string, std::vector<std::pair<std::string, double>>>
+        BatchZRead(const std::vector<std::string>& zsetKeys);
+
     // ==================== Advanced Operations ====================
     static std::vector<std::string> ScanInstanceKeys(
         const std::string& pattern = "instance*",
@@ -42,6 +57,12 @@ public:
         int batch_size = 1000,
         int top_n = 10
     );
+
+    static std::vector<std::string> GetKeysInSet(
+        const std::string& set_name = "instanceinfo_keys"
+    );
+
+    static std::vector<std::string> GetAliveInstanceList();
 
 private:
     // ==================== C Interop Helpers ====================

@@ -44,13 +44,7 @@ int main(int argc, char* argv[])
             throw std::runtime_error("Missing required fields in config");
         }
 
-        MetaService service(
-            config_path,
-            config["self_ip"].get<std::string>(),
-            config["members_ip"].get<std::vector<std::string>>(),
-            config.value("etcd", json::object()),
-            config.value("redis_cluster", json::object())
-        );
+        MetaService service(config_path, config);
 
         service.Run();
     }
